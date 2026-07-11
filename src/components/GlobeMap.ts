@@ -74,6 +74,13 @@ const SAT_TYPE_EMOJI: Record<string, string> = { sar: '\u{1F4E1}', optical: '\u{
 const SAT_TYPE_LABEL: Record<string, string> = { sar: 'SAR Imaging', optical: 'Optical Imaging', military: 'Military', sigint: 'SIGINT' };
 const SAT_OPERATOR_NAME: Record<string, string> = { CN: 'China', RU: 'Russia', US: 'United States', EU: 'ESA / EU', KR: 'South Korea', IN: 'India', TR: 'Turkey', OTHER: 'Other' };
 
+function saveWebcamMarkerMode(mode: string): void {
+  try {
+    localStorage.setItem('wm-webcam-marker-mode', mode);
+  } catch {
+    // The in-memory marker mode still applies for the current session.
+  }
+}
 // ─── Marker discriminated union ─────────────────────────────────────────────
 interface BaseMarker {
   _kind: string;
@@ -545,7 +552,13 @@ export class GlobeMap {
   private satelliteFootprintMarkers: SatFootprintMarker[] = [];
   private imagerySceneMarkers: ImagerySceneMarker[] = [];
   private webcamMarkers: (WebcamMarkerData | WebcamClusterData)[] = [];
-  private webcamMarkerMode: string = localStorage.getItem('wm-webcam-marker-mode') || 'icon';
+  private webcamMarkerMode: string = (() => {
+    try {
+      return localStorage.getItem('wm-webcam-marker-mode') || 'icon';
+    } catch {
+      return 'icon';
+    }
+  })();
   private imageryFootprintPolygons: GlobePolygon[] = [];
   private lastImageryCenter: { lat: number; lon: number } | null = null;
   private imageryFetchTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1978,7 +1991,7 @@ export class GlobeMap {
       const modeRow = document.createElement('div');
       modeRow.className = 'webcam-mode-row';
       modeRow.style.cssText = 'display:none;padding:2px 6px 4px 24px;font-size:10px;color:#aaa;';
-      const currentMode = (): string => localStorage.getItem('wm-webcam-marker-mode') || 'icon';
+      const currentMode = (): string => this.webcamMarkerMode;
       const renderModeLabel = (): string => currentMode() === 'emoji' ? '&#128247; icon mode' : '&#128512; emoji mode';
       const modeBtn = document.createElement('button');
       modeBtn.style.cssText = 'background:rgba(0,212,255,0.1);border:1px solid rgba(0,212,255,0.3);color:#00d4ff;font-size:10px;padding:1px 6px;border-radius:3px;cursor:pointer;margin-left:2px;';
@@ -1987,8 +2000,8 @@ export class GlobeMap {
       modeBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         const next = currentMode() === 'icon' ? 'emoji' : 'icon';
-        localStorage.setItem('wm-webcam-marker-mode', next);
         this.webcamMarkerMode = next;
+        saveWebcamMarkerMode(next);
         setTrustedHtml(modeBtn, trustedHtml(renderModeLabel(), "legacy direct innerHTML migration"));
         this.flushMarkers();
       });

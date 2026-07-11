@@ -71,6 +71,21 @@ import { setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
 import { loadPanelCollapsed, loadPanelColSpans, loadPanelSpans } from '@/utils/panel-storage';
 import { measure, mutate } from '@/utils/layout-batch';
 
+function readSessionStorageValue(key: string): string | null {
+  try {
+    return window.sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeSessionStorageValue(key: string, value: string): void {
+  try {
+    window.sessionStorage.setItem(key, value);
+  } catch {
+    // Banner dismissal remains functional for this render even without persistence.
+  }
+}
 
 /**
  * Panels that require premium access on web. Auth-based gating applies to
@@ -1217,7 +1232,7 @@ export class PanelLayoutManager implements AppModule {
   }
 
   renderCriticalBanner(postures: TheaterPostureSummary[]): void {
-    const dismissedAt = sessionStorage.getItem('banner-dismissed');
+    const dismissedAt = readSessionStorageValue('banner-dismissed');
     if (dismissedAt && Date.now() - parseInt(dismissedAt, 10) < 30 * 60 * 1000) {
       return;
     }
@@ -1273,7 +1288,7 @@ export class PanelLayoutManager implements AppModule {
       trackCriticalBannerAction('dismiss', top.theaterId);
       this.criticalBannerEl?.classList.add('dismissed');
       document.body.classList.remove('has-critical-banner');
-      sessionStorage.setItem('banner-dismissed', Date.now().toString());
+      writeSessionStorageValue('banner-dismissed', Date.now().toString());
     });
   }
 
@@ -2677,8 +2692,8 @@ export class PanelLayoutManager implements AppModule {
 
     const allOrder = this.buildUnifiedOrder(sidebarIds, bottomIds);
     this.resolvedPanelOrder = allOrder;
-    localStorage.setItem(this.ctx.PANEL_ORDER_KEY, JSON.stringify(allOrder));
-    localStorage.setItem(this.ctx.PANEL_ORDER_KEY + '-bottom-set', JSON.stringify(Array.from(this.bottomSetMemory)));
+    saveToStorage(this.ctx.PANEL_ORDER_KEY, allOrder);
+    saveToStorage(this.ctx.PANEL_ORDER_KEY + '-bottom-set', Array.from(this.bottomSetMemory));
   }
 
   private buildUnifiedOrder(sidebarIds: string[], bottomIds: string[]): string[] {
