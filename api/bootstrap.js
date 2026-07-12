@@ -1,4 +1,4 @@
-import { getCorsHeaders, isDisallowedOrigin } from './_cors.js';
+import { getCorsHeaders, getPublicCorsHeaders, isDisallowedOrigin } from './_cors.js';
 import {
   USER_API_KEY_GATEWAY_VALIDATION_ERROR,
   getHeaderApiKey,
@@ -238,6 +238,40 @@ export function isPublicWeatherBootstrapRequest(req) {
   return requested.length === 1 && requested[0] === 'weatherAlerts';
 }
 
+const PUBLIC_BOOTSTRAP_TIERS = new Set(['fast', 'slow']);
+
+// An explicit public tier bootstrap read (?tier=fast|slow&public=1, no other
+// params) returns the shared
+// production seed payload — identical for every caller (see PR #4499 non-goals:
+// only static transforms like wildfire compaction / enrichmentMeta strip apply,
+// never per-user variance). The explicit marker gives the shared response its
+// own CDN cache key; the legacy ?tier=fast|slow URLs remain credentialed and
+// no-store, so a warmed public response cannot bypass their auth/CORS contract.
+// The public URL is public regardless of request credentials because a CDN hit
+// occurs before handler auth. Callers that need credential processing must use
+// the legacy URL. Scoped to the two fixed public shapes so the CDN key space
+// stays tiny and hit rate high.
+//
+// GET only: a HEAD here would still run the full registry Redis read to build a
+// body it must not return — the exact unshielded egress this path exists to
+// avoid. HEAD tier reads have no client and fall through to the no-store path.
+export function isPublicTierBootstrapRequest(req) {
+  if (req.method !== 'GET') return false;
+
+  const url = new URL(req.url);
+  const pathname = url.pathname.length > 1 ? url.pathname.replace(/\/+$/, '') : url.pathname;
+  if (pathname !== '/api/bootstrap') return false;
+
+  const params = Array.from(url.searchParams.keys());
+  if (params.some((key) => key !== 'tier' && key !== 'public')) return false;
+
+  const tierParams = url.searchParams.getAll('tier');
+  const publicParams = url.searchParams.getAll('public');
+  if (tierParams.length !== 1 || publicParams.length !== 1 || publicParams[0] !== '1') return false;
+
+  return PUBLIC_BOOTSTRAP_TIERS.has(tierParams[0]);
+}
+
 const BOOTSTRAP_CREDENTIAL_COOKIES = new Set(['wm-session', 'wm-pro-key', 'wm-widget-key']);
 
 function hasBootstrapCredentialCookie(req) {
@@ -295,10 +329,21 @@ async function getCachedJsonBatch(keys) {
   // populate prefixed keys, so prefixing would always miss.
   const pipeline = keys.map((k) => ['GET', k]);
   const data = await redisPipeline(pipeline, 3000);
-  if (!data) return result;
+  if (!Array.isArray(data) || data.length !== keys.length) {
+    throw new Error('Bootstrap Redis pipeline unavailable');
+  }
 
   for (let i = 0; i < keys.length; i++) {
-    const raw = data[i]?.result;
+    const entry = data[i];
+    if (
+      !entry
+      || typeof entry !== 'object'
+      || !('result' in entry)
+      || entry.error != null
+    ) {
+      throw new Error('Bootstrap Redis pipeline command failed');
+    }
+    const raw = entry.result;
     if (raw) {
       try {
         const parsed = JSON.parse(raw);
@@ -325,8 +370,15 @@ function authFailure(body, status, cors, extraHeaders = {}) {
 
 async function validateBootstrapAuth(req, cors) {
   const headerKey = getHeaderApiKey(req);
-  if (!headerKey && !hasBootstrapCredentialCookie(req) && isPublicWeatherBootstrapRequest(req)) {
-    return { ok: true, kind: 'public-weather' };
+  // The explicit public URL must have one response contract for every request:
+  // Vercel may serve it from cache before cookie/header auth reaches this code.
+  if (isPublicTierBootstrapRequest(req)) {
+    return { ok: true, kind: 'public-tier' };
+  }
+  if (!headerKey && !hasBootstrapCredentialCookie(req)) {
+    if (isPublicWeatherBootstrapRequest(req)) {
+      return { ok: true, kind: 'public-weather' };
+    }
   }
 
   const apiKeyResult = await validateApiKey(req);
@@ -397,17 +449,28 @@ async function validateBootstrapAuth(req, cors) {
   };
 }
 
+function isPublicBootstrapKind(authKind) {
+  return authKind === 'public-weather' || authKind === 'public-tier';
+}
+
 function successCacheHeaders(tier, authKind, cors) {
-  if (authKind !== 'public-weather') {
+  if (!isPublicBootstrapKind(authKind)) {
     return {
       ...cors,
       'Cache-Control': 'no-store',
     };
   }
 
+  // Public seed payload with no per-user variation: serve with ACAO:* (no
+  // Vary: Origin, no Access-Control-Allow-Credentials) so the shared CDN stores
+  // ONE entry per URL instead of one per Origin, and no preview/embed origin can
+  // pin an echoed ACAO onto a cached response. Safe because isDisallowedOrigin()
+  // already rejected unauthorized origins at the handler entry (this is exactly
+  // the contract getPublicCorsHeaders documents).
+  const publicCors = getPublicCorsHeaders();
   const cacheControl = (tier && TIER_CACHE[tier]) || 'public, s-maxage=600, stale-while-revalidate=120, stale-if-error=900';
   return {
-    ...cors,
+    ...publicCors,
     'Cache-Control': cacheControl,
     'CDN-Cache-Control': (tier && TIER_CDN_CACHE[tier]) || TIER_CDN_CACHE.fast,
   };
@@ -444,10 +507,22 @@ export default async function handler(req) {
   try {
     cached = await getCachedJsonBatch(keys);
   } catch {
-    // Only the anonymous weather bootstrap may avoid no-store here; every
-    // other successful bootstrap response can carry session/key scoped data.
-    const cacheControl = auth.kind === 'public-weather' ? 'no-cache' : 'no-store';
-    return jsonResponse({ data: {}, missing: names }, 200, { ...cors, 'Cache-Control': cacheControl });
+    const isPublic = isPublicBootstrapKind(auth.kind);
+    if (isPublic) {
+      // Infrastructure failure is not an empty registry. Make it retryable and
+      // omit every CDN cache header so the outage response cannot replace a
+      // healthy public snapshot at the shared cache key.
+      return jsonResponse(
+        { error: 'Bootstrap service temporarily unavailable' },
+        503,
+        {
+          ...getPublicCorsHeaders(),
+          'Cache-Control': 'no-store',
+          'Retry-After': '5',
+        },
+      );
+    }
+    return jsonResponse({ data: {}, missing: names }, 200, { ...cors, 'Cache-Control': 'no-store' });
   }
 
   const data = {};

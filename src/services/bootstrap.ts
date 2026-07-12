@@ -116,7 +116,10 @@ async function fetchTier(
   let missingKeys: string[] = [];
 
   try {
-    const resp = await fetch(toApiUrl(`/api/bootstrap?tier=${tier}`), { signal });
+    // public=1 gives the shared seed bundle a cache key distinct from the legacy
+    // credentialed tier URL. credentials:'omit' also avoids sending cookies to
+    // a route whose contract is explicitly public (see #5249).
+    const resp = await fetch(toApiUrl(`/api/bootstrap?tier=${tier}&public=1`), { signal, credentials: 'omit' });
     if (resp.ok) {
       const payload = (await resp.json()) as {
         data?: Record<string, unknown>;
