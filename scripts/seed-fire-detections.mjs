@@ -133,6 +133,16 @@ async function main() {
 
   await runSeed('wildfire', 'fires', CANONICAL_KEY, () => fetchAllRegions(apiKey), {
     validateFn: (data) => Array.isArray(data?.fireDetections) && data.fireDetections.length > 0,
+    // 2h — deliberately BELOW the 6h health gate (maxStaleMin 360). Do NOT "fix" this
+    // by raising it to satisfy tests/seed-ttl-outlives-staleness-fleet: doing so DOWNGRADES
+    // a safety alarm. Verified against classifyKey with the seeder dead for 3h:
+    //
+    //   ttl 2h (this):  wildfires -> EMPTY (crit)   — ops is paged, panel blanks honestly
+    //   ttl 7h:         wildfires -> OK    (green)  — 3h-old fire data served, silently
+    //
+    // The canonical `wildfires` is NOT in EMPTY_DATA_OK_KEYS, so its key expiring at 2h is
+    // exactly what makes a dead fire feed loud. A longer TTL keeps stale data alive past
+    // the gate and turns that crit into a warn (and, inside the gate, into a green).
     ttlSeconds: 7200,
     lockTtlMs: 2_400_000, // 40 min — 27 slots × ~72s worst case (30s timeout + 6s backoff + 30s retry + 6s pace) ≈ 32.4 min; pad headroom. Next cron tick sees lock held and safely skips.
     sourceVersion: FIRMS_SOURCES.join('+'),
